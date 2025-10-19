@@ -91,7 +91,7 @@ class GitHubCrawler:
         self.client = client
         self.db = db
 
-    def fetch_and_store_repos(self, limit=100):
+    def fetch_and_store_repos(self, limit=100000):
         """Fetch repositories and store them in Postgres."""
         all_repos = []
         has_next_page = True

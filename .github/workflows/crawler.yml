@@ -63,6 +63,7 @@ jobs:
               owner_name TEXT NOT NULL,
               repo_name TEXT NOT NULL,
               stars INTEGER,
+              created_at TIMESTAMP,
               last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
               UNIQUE (owner_name, repo_name)
           );

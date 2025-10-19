@@ -165,9 +165,6 @@ def store_in_postgres(conn, repositories):
 
 if __name__ == "__main__":
     try:
-        from dotenv import load_dotenv
-        load_dotenv()
-
         token = os.getenv("GITHUB_TOKEN")
         if not token:
             raise ValueError("❌ Missing GITHUB_TOKEN environment variable.")

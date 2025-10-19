@@ -2,9 +2,6 @@ import requests
 import psycopg2
 import time
 import os
-# from dotenv import load_dotenv
-
-# load_dotenv()
 
 # --- GitHub API Config ---
 url = "https://api.github.com/graphql"

@@ -102,7 +102,7 @@ class GitHubCrawler:
 
             query = f"""
             {{
-                search (query: "stars:>1000", type: REPOSITORY, first: 10 {f', after: "{end_cursor}"' if end_cursor else ''}) {{
+                search (query: "stars:>10", type: REPOSITORY, first: 100 {f', after: "{end_cursor}"' if end_cursor else ''}) {{
                     pageInfo {{
                         endCursor
                         hasNextPage

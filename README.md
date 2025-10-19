@@ -53,7 +53,7 @@ The flow:
 4. Store them into PostgreSQL.
 
 ## 🧠  How the 1,000 Limit is Solved
-GitHub’s GraphQL search query allows fetching only 1,000 results per search. To bypass this, the crawler splits the data by creation date (monthly). Each monthly range gives up to 1,000 results — around 100 months yield 100,000 repositories.
+GitHub’s GraphQL search query allows fetching only 1,000 results per search. To bypass this, the crawler splits the data by creation date (monthly). Each monthly range gives up to 1,000 results, around 100 months yield 100,000 repositories.
 
 Example GraphQL query:
 ```

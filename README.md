@@ -1,9 +1,9 @@
 # 🕸️ GitHub Crawler
 
-This project is a **GitHub repository crawler** built using Python, PostgreSQL, and GitHub's GraphQL API.  
-It collects repository data (e.g., stars, owner, repo name) for a large number of repositories and stores them in a PostgreSQL database.
+This project implements a **GitHub Crawler** using GitHub’s GraphQL API to collect the number of stars for up to 100,000 repositories.
+It respects rate limits, includes retry mechanisms, and stores data efficiently in PostgreSQL.
 
-The project includes a **GitHub Actions CI/CD pipeline** that automates setup, crawling, and exporting results — all while respecting GitHub API rate limits and maintaining clean software architecture.
+The project includes a **GitHub Actions CI/CD pipeline** that automates setup, crawling, and exporting results. All while respecting GitHub API rate limits and maintaining clean software architecture.
 
 ---
 
@@ -14,7 +14,7 @@ The project includes a **GitHub Actions CI/CD pipeline** that automates setup, c
 - Stores repository information in a **PostgreSQL** database.
 - Automatically updates existing records without duplication.
 - Handles **API rate limits** and includes a **retry mechanism**.
-- Uses a **class-based, modular architecture** with clear separation of concerns.
+- Uses a **fetch_repositories, store_in_postgres** functions for fetching repos and storing the data in postgreSQL.
 
 ---
 
@@ -31,6 +31,46 @@ The project includes a **GitHub Actions CI/CD pipeline** that automates setup, c
 
 ---
 
+## 🚀 Features
+- ✅ Uses GitHub GraphQL API (not REST)
+- ✅ Bypasses the 1,000-result limit by splitting queries monthly
+- ✅ Stores results in PostgreSQL
+- ✅ Handles rate limits gracefully (pauses automatically)
+- ✅ Includes retry on API/network errors
+- ✅ Easy to understand (only two main functions)
+
+---
+
+## 🧱 Architecture
+There are two main functions:
+- fetch_repositories(): Fetches repository data from GitHub GraphQL API in monthly batches.
+- store_in_postgres(): Saves or updates repositories in a PostgreSQL database.
+
+The flow:
+1. Generate monthly date ranges from 2014 → 2024.
+2. For each month, use a GraphQL query to fetch up to 1,000 repos.
+3. Continue until reaching 100,000 total repositories.
+4. Store them into PostgreSQL.
+
+## 🧠  How the 1,000 Limit is Solved
+GitHub’s GraphQL search query allows fetching only 1,000 results per search. To bypass this, the crawler splits the data by creation date (monthly). Each monthly range gives up to 1,000 results — around 100 months yield 100,000 repositories.
+
+Example GraphQL query:
+```
+{
+  search(query: "created:2019-01-01..2019-02-01", type: REPOSITORY, first: 100) {
+    nodes {
+      name
+      owner { login }
+      stargazerCount
+      createdAt
+    }
+  }
+}
+```
+
+---
+
 ## ⚙️ Setup Instructions (Local Development)
 
 ### 1️⃣ Clone the Repository
@@ -39,7 +79,13 @@ git clone https://github.com/MuhammadHuzaifa21/GitHub-Crawler.git
 cd GitHub-Crawler
 ```
 
-### 2️⃣ Create and Setup PostgreSQL Database
+### 2️⃣ Install Dependencies
+Create a virtual environment and install:
+```bash
+pip install -r requirements.txt
+```
+
+### 3️⃣ Create and Setup PostgreSQL Database
 Make sure PostgreSQL is installed and running.
 
 ```bash
@@ -54,11 +100,6 @@ CREATE TABLE repositories (
     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (owner_name, repo_name)
 );
-```
-
-### 3️⃣ Install Dependencies
-```bash
-pip install -r requirements.txt
 ```
 
 ### 4️⃣ Set GitHub Token as Environment Variable
@@ -79,9 +120,15 @@ python github_crawler.py
 
 You should see output like:
 ```
-Fetching batch... (Total: 0)
-Fetching batch... (Total: 10)
-✅ Saved 10 repositories into PostgreSQL!
+🔍 Fetching repos for created:2019-01-01..2020-01-01
+📦 Total fetched so far: 6100
+📦 Total fetched so far: 6200
+    ...
+    ...
+📦 Total fetched so far: 100099
+✅ Target reached: 100099 repositories.
+💾 Stored 100099 repositories in PostgreSQL.
+🧹 Database connection closed.
 ```
 
 ---
@@ -101,70 +148,55 @@ You can view workflow runs under the **"Actions" tab** of your repository.
 
 ---
 
-## 🧠 Key Code Components (Class-Based Design)
+## 🧠 Key Code Components
 
-### **1. DatabaseManager**
-Handles all interactions with the PostgreSQL database.
+### **1. get_query**
+Handles GitHub GraphQL search query using filters.
 
-**Responsibilities:**
-- Creates and initializes tables.
-- Inserts or updates repository data using `ON CONFLICT`.
-- Uses transactions and commits for efficiency.
-- Closes DB connections cleanly to prevent leaks.
+### **2. handle_errors**
+Handles errors raised in GraphQL search query response.
 
-### **2. GitHubCrawler**
+### **3. fetch_repositories**
 Handles communication with the GitHub GraphQL API.
 
 **Responsibilities:**
-- Sends paginated GraphQL queries to fetch repository data.
-- Respects GitHub’s rate limits and pauses when necessary.
-- Implements a retry mechanism with exponential backoff.
-- Returns clean, structured repository data.
+- Since GraphQL API can return only 1000 result/query.
+- Uses filters based on months, so that we can query on approximately 100 months to get 100,000 results. 
+- Uses retry mechanism in case of failures.
 
-### **3. CrawlerService**
-Coordinates both the API and database layers.
+### **4. store_in_postgres**
+Handles all interactions with the PostgreSQL database.
 
 **Responsibilities:**
-- Calls `GitHubCrawler` to fetch repositories.
-- Passes normalized data to `DatabaseManager` for storage.
-- Logs progress, handles exceptions, and manages crawl loop.
-
-This modular structure follows **clean architecture** principles, each class is testable and independently replaceable.
+- Makes connection with postgres.
+- Create the table schema for storing repositories data.
+- Insert data into the respositories table.
+- Uses constraint on unique name, no duplication allowed.
+- If a name already exists, it will only update it's star count.
 
 ---
 
 ## 🧩 Rate Limiting & Retry Strategy
 
-- GitHub API allows up to **5000 requests/hour** for authenticated users.
+- GitHub GraphQL search endpoint `(search{})` can only return the first 1,000/query
 - Script checks rate limit headers (`X-RateLimit-Remaining`, `X-RateLimit-Reset`).
 - Automatically waits if the limit is near.
-- Uses **exponential backoff** for retries in case of errors.
-
-Example:
-```python
-for attempt in range(max_retries):
-    try:
-        response = requests.post(...)
-        if response.status_code == 200:
-            break
-        else:
-            raise Exception("Bad response")
-    except Exception as e:
-        wait = 2 ** attempt
-        time.sleep(wait)
-```
+- Uses upto 3 retries in case of errors.
 
 ---
 
 ## 🧱 Database Schema (Flexible Design)
 
-| Column        | Type         | Description                     |
+| Column         | Type         | Description                      |
 |----------------|--------------|----------------------------------|
 | id             | SERIAL       | Primary key                      |
 | owner_name     | TEXT         | GitHub username                  |
 | repo_name      | TEXT         | Repository name                  |
 | stars          | INT          | Star count                       |
+| created_at     | TIMESTAMP    | Repo Creation Time               |
 | last_updated   | TIMESTAMP    | Last update time                 |
+
+---
 
 ### 🔮 Future Schema Expansion
 If we add new metadata (issues, PRs, comments), we can:
@@ -178,17 +210,15 @@ If we add new metadata (issues, PRs, comments), we can:
 
 This project follows software engineering principles:
 
-- **Separation of Concerns:** Clear distinction between API, database, and orchestration layers.  
-- **Immutability:** Repository data is not overwritten unnecessarily.  
+- **Separation of Concerns:** Clear distinction between functions, also used small separate functions to make code more clean.  
 - **Retry + Resilience:** Failures are retried with backoff delay.  
-- **Anti-Corruption Layer:** GitHub API responses are transformed before saving.  
 - **Clean Folder Layout:** Codebase is modular, testable, and extendable.  
 
 ---
 
 ## 📊 Performance Optimization
 
-- Fetches data in **paginated batches** (10 repos per query).  
+- Fetches data in **paginated batches** (100 repos per query).  
 - Minimizes DB writes using **UPSERT** via `ON CONFLICT`.  
 - Can scale further using **async calls** or multiple parallel workers.  
 
@@ -205,17 +235,17 @@ This project follows software engineering principles:
 
 ## 🧰 Troubleshooting
 
-| Error | Cause | Fix |
+| Error | Cause  | Fix |
 |-------|--------|-----|
 | `ON CONFLICT` error | Missing unique constraint | Ensure `UNIQUE(owner_name, repo_name)` in schema |
-| API limit reached | Exceeded 5000 requests/hour | Wait or use a new token |
+| API limit reached | Exceeded 1000 results/query | Wait or use a new token |
 | Database connection refused | Postgres not running | Check host, port, or credentials |
 
 ---
 
 ## 🧑‍💻 Author
 **Muhammad Huzaifa**  
-Software Engineer | Web Developer | Tech Enthusiast  
+Software Engineer | Web Developer | AI Agents | Tech Enthusiast
 🌐 [GitHub Profile](https://github.com/MuhammadHuzaifa21)
 
 ---

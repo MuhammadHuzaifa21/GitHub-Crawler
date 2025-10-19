@@ -1,135 +1,174 @@
+import os
+import time
 import requests
 import psycopg2
-import time
-import os
 
-# --- GitHub API Config ---
-url = "https://api.github.com/graphql"
-token = os.getenv("GITHUB_TOKEN")
+# ============================================================
+#  GITHUB CLIENT (Anti-Corruption Layer)
+# ============================================================
 
-if not token:
-    raise ValueError("❌ No GitHub token found. Set GITHUB_TOKEN in environment variables.")
+class GitHubClient:
+    def __init__(self, token: str):
+        self.url = "https://api.github.com/graphql"
+        self.headers = {"Authorization": f"Bearer {token}"}
 
-headers = {"Authorization": f"Bearer {token}"}
+    def run_query(self, query: str):
+        """Run a GitHub GraphQL query with retries and rate-limit handling."""
+        max_retries = 3
 
-# --- PostgresSQL Config ---
-conn = psycopg2.connect(
-    dbname = 'github_data',
-    user = 'postgres',
-    password = 'postgres',
-    host = "localhost",
-    port = '5432'
-)
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(self.url, json={"query": query}, headers=self.headers)
 
-cursor = conn.cursor()
+                # Handle rate limit
+                if response.status_code == 403:
+                    reset_time = int(response.headers.get("X-RateLimit-Reset", time.time() + 60))
+                    wait_for = max(0, reset_time - time.time())
+                    print(f"⏳ Rate limit hit. Waiting {wait_for:.2f}s before retrying...")
+                    time.sleep(wait_for)
+                    continue
 
-# --- Function to fetch Repositories ---
-def fetch_repositories():
-    all_repos = []
-    has_next_page = True
-    end_cursor = None
+                # Handle success
+                if response.status_code == 200:
+                    return response.json()
 
+                print(f"⚠️ GitHub API error: {response.status_code} — {response.text}")
+                time.sleep(2)
 
-    while has_next_page and len(all_repos) < 50:
-        print(f"Fetching batch... (Total: {len(all_repos)})")
+            except requests.exceptions.RequestException as e:
+                print(f"⚠️ Network error (attempt {attempt+1}/{max_retries}): {e}")
+                time.sleep(3)
 
-        query = f"""
-        {{
-            search (query: "stars:>1000", type: REPOSITORY, first: 10 {f', after: "{end_cursor}"' if end_cursor else ''}) {{
-                pageInfo {{
-                    endCursor
-                    hasNextPage
-                }}
-                nodes {{
-                    ... on Repository {{
-                        name
-                        owner {{ login }}
-                        stargazerCount
+        raise Exception("❌ All retry attempts failed after hitting GitHub API issues.")
+
+# ============================================================
+#  DATABASE LAYER
+# ============================================================
+
+class PostgresDB:
+    def __init__(self, conn):
+        self.conn = conn
+        self.cursor = conn.cursor()
+        self.setup_schema()
+
+    def setup_schema(self):
+        """Create repositories table if it doesn't exist."""
+        self.cursor.execute("""
+        CREATE TABLE IF NOT EXISTS repositories (
+            id SERIAL PRIMARY KEY,
+            owner_name TEXT NOT NULL,
+            repo_name TEXT NOT NULL,
+            stars INTEGER,
+            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (owner_name, repo_name)
+        );
+        """)
+        self.conn.commit()
+
+    def upsert_repositories(self, repos):
+        """Insert or update repository data efficiently."""
+        for repo in repos:
+            owner = repo['owner']['login']
+            name = repo['name']
+            stars = repo['stargazerCount']
+
+            self.cursor.execute("""
+            INSERT INTO repositories (owner_name, repo_name, stars)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (owner_name, repo_name)
+            DO UPDATE SET
+                stars = EXCLUDED.stars,
+                last_updated = CURRENT_TIMESTAMP;
+            """, (owner, name, stars))
+        self.conn.commit()
+
+# ============================================================
+#  CRAWLER (Main Logic)
+# ============================================================
+
+class GitHubCrawler:
+    def __init__(self, client: GitHubClient, db: PostgresDB):
+        self.client = client
+        self.db = db
+
+    def fetch_and_store_repos(self, limit=100):
+        """Fetch repositories and store them in Postgres."""
+        all_repos = []
+        has_next_page = True
+        end_cursor = None
+
+        while has_next_page and len(all_repos) < limit:
+            print(f"📦 Fetching batch... (Total so far: {len(all_repos)})")
+
+            query = f"""
+            {{
+                search (query: "stars:>1000", type: REPOSITORY, first: 10 {f', after: "{end_cursor}"' if end_cursor else ''}) {{
+                    pageInfo {{
+                        endCursor
+                        hasNextPage
+                    }}
+                    nodes {{
+                        ... on Repository {{
+                            name
+                            owner {{ login }}
+                            stargazerCount
+                        }}
                     }}
                 }}
             }}
-        }}
-        """
+            """
 
-        # --- Retry Mechanism ---
-        for attempt in range(3):
             try:
-                response = requests.post(url, json={"query": query}, headers=headers, timeout=10)
-                response.raise_for_status()
-                break
-            except requests.exceptions.RequestException as e:
-                print(f"⚠️ Attempt {attempt+1} failed: {e}")
-                if attempt < 2:
-                    wait = 2 ** attempt
-                    print(f"Retrying in {wait} seconds...")
-                    time.sleep(wait)
-                else:
-                    print("❌ Max retries reached. Skipping this batch.")
-                    return []
+                data = self.client.run_query(query)
+                search = data["data"]["search"]
+                repos = search["nodes"]
 
-        # --- Handle API Response ---
-        data = response.json()
+                self.db.upsert_repositories(repos)
+                all_repos.extend(repos)
 
-        # Error handling for GraphQL errors
-        if "errors" in data:
-            print(f"⚠️ GraphQL error: {data['errors']}")
-            break
+                has_next_page = search["pageInfo"]["hasNextPage"]
+                end_cursor = search["pageInfo"]["endCursor"]
 
-        # Extract data
-        try:
-            search_data = data["data"]["search"]
-        except (KeyError, TypeError):
-            print("⚠️ Unexpected API response:", data)
-            break
+                # Short delay to stay under GitHub's secondary rate limits
+                time.sleep(1.5)
 
-        all_repos.extend(search_data["nodes"])
+            except Exception as e:
+                print(f"❌ Error while fetching batch: {e}")
+                time.sleep(3)
 
-        has_next_page = search_data["pageInfo"]["hasNextPage"]
-        end_cursor = search_data["pageInfo"]["endCursor"]
+        print(f"✅ Completed! Total repositories processed: {len(all_repos)}")
 
-        # Checking the rate limit
-        remaining = int(response.headers.get("X-RateLimit-Remaining", 1))
-        reset_time = int(response.headers.get("X-RateLimit-Reset", time.time() + 60))
-        
-        # Sleep if almost at limits
-        if remaining < 10:
-            wait = reset_time - time.time() + 5
-            print(f"⏸ Rate limit nearly exhausted. Sleeping for {wait:.0f} seconds...")
-            time.sleep(wait)
+# ============================================================
+#  MAIN ENTRY POINT
+# ============================================================
 
-        # --- Safety Delay Between Batches ---
-        time.sleep(2)
+if __name__ == "__main__":
+    try:
+        token = os.getenv("GITHUB_TOKEN")
+        if not token:
+            raise ValueError("❌ Missing GITHUB_TOKEN environment variable.")
 
-    return all_repos
+        conn = psycopg2.connect(
+            dbname='github_data',
+            user='postgres',
+            password='postgres',
+            host='localhost',
+            port='5432'
+        )
 
-# --- Function to Save Data into PostgreSQL ---
-def save_to_postgres(repos):
-    for repo in repos:
-        owner = repo['owner']['login']
-        name = repo['name']
-        stars = repo['stargazerCount']
+        client = GitHubClient(token)
+        db = PostgresDB(conn)
+        crawler = GitHubCrawler(client, db)
 
-        cursor.execute("""
-        INSERT INTO repositories (owner_name, repo_name, stars)
-        VALUES (%s, %s, %s)
-        ON CONFLICT (owner_name, repo_name)
-        DO UPDATE SET stars = EXCLUDED.stars, last_updated = CURRENT_TIMESTAMP
-        """, (owner, name, stars))
+        # 🔸 Fetch 50 repos for testing (must change to 100000 in final) *
+        crawler.fetch_and_store_repos(limit=50)
 
-    conn.commit()
-    print(f"✅ Saved {len(repos)} repositories into PostgreSQL!")
+    except Exception as e:
+        print("❌ Unexpected error:", e)
 
-# --- Main Script ---
-try:
-    repos = fetch_repositories()
-    if repos:
-        save_to_postgres(repos)
-    else:
-        print("⚠️ No repositories fetched.")
-except Exception as e:
-    print(f"❌ Unexpected error: {e}")
-finally:
-    # --- Cleanup ---
-    cursor.close()
-    conn.close()
-    print("🧹 Database connection closed.")
+    finally:
+        if 'db' in locals():
+            db.cursor.close()
+        if 'conn' in locals():
+            conn.close()
+        print("🧹 Database connection closed.")

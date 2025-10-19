@@ -1,0 +1,103 @@
+name: GitHub Crawler
+
+on:
+  workflow_dispatch:   # allows manual trigger
+  schedule:
+    - cron: '0 0 * * *'  # optional: run daily at midnight (UTC)
+
+jobs:
+  crawl-stars:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:13
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: github_data
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Wait for Postgres
+        run: |
+          until pg_isready -h localhost -U postgres; do
+            echo "Waiting for postgres..."
+            sleep 2
+          done
+
+      - name: Setup database schema
+        run: |
+          python - <<'EOF'
+          import psycopg2
+          conn = psycopg2.connect(
+              dbname="github_data",
+              user="postgres",
+              password="postgres",
+              host="localhost",
+              port="5432"
+          )
+          cur = conn.cursor()
+          cur.execute("""
+          CREATE TABLE IF NOT EXISTS repositories (
+              id SERIAL PRIMARY KEY,
+              owner_name VARCHAR(255),
+              repo_name VARCHAR(255),
+              stars INT,
+              last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+          """)
+          conn.commit()
+          cur.close()
+          conn.close()
+          print("✅ Database schema created.")
+          EOF
+
+      - name: Run crawler
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python github_to_postgres.py
+
+      - name: Export DB to CSV
+        run: |
+          python - <<'EOF'
+          import psycopg2
+          import pandas as pd
+
+          conn = psycopg2.connect(
+              dbname="github_data",
+              user="postgres",
+              password="postgres",
+              host="localhost",
+              port="5432"
+          )
+
+          df = pd.read_sql("SELECT * FROM repositories;", conn)
+          df.to_csv("repos.csv", index=False)
+          conn.close()
+          print("✅ Data exported to repos.csv")
+          EOF
+
+      - name: Upload artifact (repos.csv)
+        uses: actions/upload-artifact@v4
+        with:
+          name: github-repos-data
+          path: repos.csv

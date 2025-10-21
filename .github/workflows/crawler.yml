@@ -2,8 +2,8 @@ name: GitHub Crawler
 
 on:
   workflow_dispatch:   # allows manual trigger
-  schedule:
-    - cron: '0 0 * * *'  # optional: run daily at midnight (UTC)
+  #schedule:
+    #- cron: '0 0 * * *'  # optional: run daily at midnight (UTC)
 
 jobs:
   crawl-stars:
